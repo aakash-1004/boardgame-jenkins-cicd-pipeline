@@ -1,53 +1,65 @@
-# BoardgameListingWebApp
+# Boardgame Jenkins CI/CD Pipeline
 
-## Description 
+A production-style Jenkins CI/CD pipeline for a Java/Maven application, deployed to a self-managed Kubernetes cluster with enforced quality gates, security scanning, RBAC-scoped deployment access, and full observability.
 
-**Board Game Database Full-Stack Web Application.**
-This web application displays lists of board games and their reviews. While anyone can view the board game lists and reviews, they are required to log in to add/ edit the board games and their reviews. The 'users' have the authority to add board games to the list and add reviews, and the 'managers' have the authority to edit/ delete the reviews on top of the authorities of users.  
+Built end-to-end on self-provisioned AWS infrastructure — no managed CI/CD or managed Kubernetes control plane. Base application forked and adapted from a public reference project; infrastructure, pipeline, RBAC, hardening decisions, and monitoring stack are original work.
 
-## Technologies
+## Architecture
 
-- Java
-- Spring Boot
-- Amazon Web Services(AWS) EC2
-- Thymeleaf
-- Thymeleaf Fragments
-- HTML5
-- CSS
-- JavaScript
-- Spring MVC
-- JDBC
-- H2 Database Engine (In-memory)
-- JUnit test framework
-- Spring Security
-- Twitter Bootstrap
-- Maven
+```
+GitHub (private repo, Jenkinsfile as code)
+        │
+        ▼
+   Jenkins (EC2) ──► Trivy (fs + image scan)
+        │           ► SonarQube + Postgres (quality gate, enforced)
+        │           ► Nexus (Maven artifact repository)
+        │           ► Docker Hub (image registry)
+        │
+        ▼
+Kubernetes cluster (kubeadm, 1 master + 2 workers)
+   RBAC-scoped ServiceAccount → namespaced Role → deployment
+        │
+        ▼
+Prometheus + Grafana + Blackbox Exporter (dedicated monitoring server)
+```
 
-## Features
+7 dedicated EC2 servers — Jenkins, Nexus, SonarQube, Kubernetes master, 2 Kubernetes workers, monitoring — mirroring how larger orgs isolate these tools rather than running them on one box.
 
-- Full-Stack Application
-- UI components created with Thymeleaf and styled with Twitter Bootstrap
-- Authentication and authorization using Spring Security
-  - Authentication by allowing the users to authenticate with a username and password
-  - Authorization by granting different permissions based on the roles (non-members, users, and managers)
-- Different roles (non-members, users, and managers) with varying levels of permissions
-  - Non-members only can see the boardgame lists and reviews
-  - Users can add board games and write reviews
-  - Managers can edit and delete the reviews
-- Deployed the application on AWS EC2
-- JUnit test framework for unit testing
-- Spring MVC best practices to segregate views, controllers, and database packages
-- JDBC for database connectivity and interaction
-- CRUD (Create, Read, Update, Delete) operations for managing data in the database
-- Schema.sql file to customize the schema and input initial data
-- Thymeleaf Fragments to reduce redundancy of repeating HTML elements (head, footer, navigation)
+## Pipeline Stages
 
-## How to Run
+1. Git Checkout
+2. Compile (`mvn compile`)
+3. Test (`mvn test`)
+4. File System Scan — Trivy, dependency/source vulnerability scan
+5. SonarQube Analysis — static code analysis
+6. **Quality Gate** — enforced (`abortPipeline: true`); a failing gate blocks the pipeline
+7. Build (`mvn package`)
+8. Publish to Nexus (`mvn deploy`)
+9. Build & Tag Docker Image — tagged with `BUILD_NUMBER` for traceability
+10. Docker Image Scan — Trivy, container image scan
+11. Push Docker Image
+12. Deploy to Kubernetes — via RBAC-scoped ServiceAccount token
+13. Verify Deployment
 
-1. Clone the repository
-2. Open the project in your IDE of choice
-3. Run the application
-4. To use initial user data, use the following credentials.
-  - username: bugs    |     password: bunny (user role)
-  - username: daffy   |     password: duck  (manager role)
-5. You can also sign-up as a new user and customize your role to play with the application! 😊
+Post-pipeline: HTML email notification (pass/fail banner, attached scan reports) on every run, regardless of outcome.
+
+## Key Engineering Decisions
+
+- **kubeadm cluster, not managed EKS** — built the control plane, CNI (Calico), and CRI setup manually to understand what a managed Kubernetes service abstracts away, rather than only knowing the managed-service version.
+- **External Postgres for SonarQube**, not the bundled H2 database — SonarSource documents H2 as unsupported for production use.
+- **Namespace-scoped RBAC for Jenkins**, not cluster-admin — a dedicated ServiceAccount bound to a `Role` (not `ClusterRole`) with only the permissions needed to manage resources in one namespace.
+- **Quality Gate enforced, not report-only** — `abortPipeline: true` means a failing SonarQube gate stops the deploy, not just logs a warning. Validated live: a run failed on a 79% code-duplication finding, traced to the pipeline's own Trivy scan reports being swept into the analysis scope — fixed via `sonar.exclusions`, not by lowering the gate's standard.
+- **Docker images tagged by build number**, not `:latest` — every deployed image is traceable back to the exact Jenkins run that produced it.
+- **Pipeline defined as code** — Jenkinsfile lives in this repo (`Pipeline script from SCM`), not configured only in Jenkins' UI, for version history and portability.
+
+## Security & Observability
+
+- **Trivy** — filesystem and container image vulnerability scanning, both gating the pipeline
+- **SonarQube** — static analysis + enforced quality gate
+- **kubeaudit / kube-bench** — cluster configuration audited against the CIS Kubernetes Benchmark; findings triaged to distinguish genuine gaps from expected infrastructure behavior (e.g. Calico and kube-proxy require privileged/host-network access by design)
+- **Prometheus + Grafana** — cluster and service metrics via Node Exporter and the Jenkins Prometheus plugin
+- **Blackbox Exporter** — external HTTP uptime probing of Jenkins, SonarQube, and the deployed application
+
+## Stack
+
+Jenkins · Kubernetes (kubeadm) · Docker · Maven · SonarQube · PostgreSQL · Nexus · Trivy · Prometheus · Grafana · Blackbox Exporter · AWS EC2
