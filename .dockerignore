@@ -1,0 +1,6 @@
+.git
+.gitignore
+target
+*.md
+k8s
+Jenkinsfile
